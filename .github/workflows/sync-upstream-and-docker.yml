@@ -114,6 +114,8 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            DSH_CLIENT_COMMIT_HASH=${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=DeepSeek Harness Web UI

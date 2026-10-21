@@ -22,6 +22,10 @@ WORKDIR /app
 
 COPY . .
 
+# The client build embeds a commit hash; .dockerignore excludes .git, so the build receives it here.
+ARG DSH_CLIENT_COMMIT_HASH=0000000
+ENV DSH_CLIENT_COMMIT_HASH=${DSH_CLIENT_COMMIT_HASH}
+
 RUN pnpm install --frozen-lockfile
 RUN pnpm run build:artifacts
 RUN pnpm --dir native/system run build:native
