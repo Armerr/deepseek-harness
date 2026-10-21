@@ -145,6 +145,9 @@ jobs:
   merge:
     name: Publish multi-architecture image
     needs: build
+    # The skipped sync job stays in the transitive needs closure on push, so the
+    # implicit success() would skip this job even though build ran via always().
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Lowercase the image name

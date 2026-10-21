@@ -1,0 +1,33 @@
+# One-shot: disables the inherited upstream workflows that run on every master push.
+# It only runs when this file itself changes, then disables itself.
+name: One-shot disable upstream workflows
+
+on:
+  push:
+    paths:
+      - .github/workflows/oneshot-disable-upstream.yml
+
+permissions:
+  actions: write
+
+jobs:
+  disable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Disable inherited workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in \
+            ci-master.yml \
+            e2e.yml \
+            node-addon-system.yml \
+            release.yml \
+            release-vendor.yml \
+            sandbox.yml \
+            oneshot-disable-upstream.yml; do
+            echo "disabling $workflow"
+            gh workflow disable "$workflow" --repo "$GITHUB_REPOSITORY"
+          done
+          gh workflow list --all --repo "$GITHUB_REPOSITORY"
