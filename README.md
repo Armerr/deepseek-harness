@@ -40,6 +40,56 @@ pnpm dsh web
 
 `pnpm run build` prepares the repository artifacts. `pnpm dsh web` uses those built artifacts without rebuilding.
 
+<a id="run-with-docker"></a>
+
+### Run with Docker
+
+This fork publishes a multi-architecture image (`linux/amd64`, `linux/arm64`) to GHCR and rebuilds it after each upstream sync:
+
+```sh
+docker run -d --name dsh \
+  -p 3080:3080 \
+  -v dsh-data:/data \
+  -e DEEPSEEK_API_KEY=sk-... \
+  ghcr.io/armerr/deepseek-harness:latest
+
+docker logs dsh
+```
+
+The container binds its own network address because DSH rejects wildcard binds. `DSH_PUBLIC_URL` defaults to `http://localhost:3080/`, so the authenticated URL printed by `docker logs` opens from the host. For a remote host or another port, set `DSH_HOST`, `DSH_PUBLIC_URL`, and `DSH_TRUSTED_HOST` together. The `/data` volume holds `DSH_HOME` settings and sessions.
+
+The checked-in [docker-compose.yml](docker-compose.yml) runs the same configuration:
+
+```yaml
+name: deepseek-harness
+
+services:
+  dsh:
+    image: ghcr.io/armerr/deepseek-harness:latest
+    container_name: dsh
+    init: true
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DSH_PUBLIC_URL: ${DSH_PUBLIC_URL:-http://localhost:3080/}
+      DSH_TRUSTED_HOST: ${DSH_TRUSTED_HOST:-}
+    volumes:
+      - dsh-data:/data
+
+volumes:
+  dsh-data:
+```
+
+Start it with:
+
+```sh
+DEEPSEEK_API_KEY=sk-... docker compose up -d
+```
+
+Uncomment `build: .` in that file, or run `docker compose build`, to build from the current checkout instead of pulling the published image. Published tags are `latest`, `master`, and `sha-<commit>`. GHCR creates the package as private on the first push; change its visibility in the package settings if anonymous pulls are required.
+
 ## Community and support
 
 - Submit feedback or bug reports through [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions).

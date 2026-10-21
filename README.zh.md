@@ -44,6 +44,56 @@ pnpm dsh web
 
 `pnpm run build` 会准备仓库产物。`pnpm dsh web` 会直接使用这些已构建产物，不会重新构建。
 
+<a id="run-with-docker"></a>
+
+### 通过 Docker 运行
+
+本 fork 会向 GHCR 发布多架构镜像（`linux/amd64`、`linux/arm64`），并在每次同步上游后重新构建：
+
+```sh
+docker run -d --name dsh \
+  -p 3080:3080 \
+  -v dsh-data:/data \
+  -e DEEPSEEK_API_KEY=sk-... \
+  ghcr.io/armerr/deepseek-harness:latest
+
+docker logs dsh
+```
+
+DSH 拒绝通配地址绑定，容器会使用自身的网卡地址监听。`DSH_PUBLIC_URL` 默认为 `http://localhost:3080/`，因此 `docker logs` 中打印的带令牌 URL 可以直接在宿主机浏览器打开。如果使用远程主机或其他端口，请同时设置 `DSH_HOST`、`DSH_PUBLIC_URL` 和 `DSH_TRUSTED_HOST`。`/data` 卷保存 `DSH_HOME` 下的设置与会话。
+
+仓库内置的 [docker-compose.yml](docker-compose.yml) 使用相同配置：
+
+```yaml
+name: deepseek-harness
+
+services:
+  dsh:
+    image: ghcr.io/armerr/deepseek-harness:latest
+    container_name: dsh
+    init: true
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DSH_PUBLIC_URL: ${DSH_PUBLIC_URL:-http://localhost:3080/}
+      DSH_TRUSTED_HOST: ${DSH_TRUSTED_HOST:-}
+    volumes:
+      - dsh-data:/data
+
+volumes:
+  dsh-data:
+```
+
+启动：
+
+```sh
+DEEPSEEK_API_KEY=sk-... docker compose up -d
+```
+
+取消该文件中的 `build: .` 注释，或运行 `docker compose build`，即可基于当前源码构建，而不是拉取已发布镜像。已发布标签为 `latest`、`master` 和 `sha-<commit>`。GHCR 首次推送会创建私有包；如需匿名拉取，请在包设置中修改可见性。
+
 ## 社区与支持
 
 - 通过 [GitHub Discussions](https://github.com/deepseek-ai/deepseek-harness/discussions) 提交反馈或 bug 报告。

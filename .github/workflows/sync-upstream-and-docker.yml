@@ -1,0 +1,199 @@
+name: Sync upstream and build Docker image
+
+on:
+  schedule:
+    # Daily at 03:17 UTC. Scheduled runs execute on the default branch.
+    - cron: '17 3 * * *'
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      sync_upstream:
+        description: Merge the latest upstream master into this fork before building
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: upstream-sync-docker
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_BRANCH: master
+
+jobs:
+  sync:
+    name: Sync upstream
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.sync_upstream)
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
+    steps:
+      - name: Merge upstream into master
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/merge-upstream.json"
+          status="$(curl -sS -o "$response" -w '%{http_code}' \
+            -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPO/merge-upstream" \
+            --data "{\"branch\":\"$UPSTREAM_BRANCH\"}")"
+          cat "$response"
+          if [ "$status" = 409 ]; then
+            echo "::error::Upstream changes conflict with this fork. Merge upstream/$UPSTREAM_BRANCH manually and push the result; the next run continues from there."
+            exit 1
+          fi
+          if [ "$status" != 200 ]; then
+            echo "::error::merge-upstream failed with HTTP $status."
+            exit 1
+          fi
+          merge_type="$(jq -r '.merge_type // empty' "$response")"
+          case "$merge_type" in
+            merge|fast-forward)
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            none)
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unexpected merge-upstream response: $merge_type"
+              exit 1
+              ;;
+          esac
+
+  build:
+    name: Build ${{ matrix.arch }} image
+    needs: sync
+    if: |
+      always() &&
+      (needs.sync.result == 'success' || needs.sync.result == 'skipped') &&
+      (github.event_name != 'schedule' || needs.sync.outputs.changed == 'true')
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          # Native arm64 runners are available to public repositories and paid plans.
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Lowercase the image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: master
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=DeepSeek Harness Web UI
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.arch }}
+
+      - name: Export digest and commit
+        run: |
+          set -euo pipefail
+          digest='${{ steps.build.outputs.digest }}'
+          if [ -z "$digest" ]; then
+            echo "::error::The build produced no image digest."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+          git rev-parse HEAD > "$RUNNER_TEMP/digests/commit-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-architecture image
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lowercase the image name
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Create multi-architecture manifest
+        run: |
+          set -euo pipefail
+          image="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          commit_files=("$RUNNER_TEMP"/digests/commit-*)
+          commit="$(cat "${commit_files[0]}")"
+          for file in "${commit_files[@]}"; do
+            if [ "$(cat "$file")" != "$commit" ]; then
+              echo "::error::Platform builds used different commits."
+              exit 1
+            fi
+          done
+
+          digests=()
+          for file in "$RUNNER_TEMP"/digests/*; do
+            name="$(basename "$file")"
+            case "$name" in
+              commit-*) continue ;;
+            esac
+            digests+=("$image@sha256:$name")
+          done
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo "::error::Expected two platform digests, found ${#digests[@]}."
+            exit 1
+          fi
+
+          docker buildx imagetools create \
+            --tag "$image:latest" \
+            --tag "$image:master" \
+            --tag "$image:sha-${commit:0:7}" \
+            "${digests[@]}"
+
+      - name: Inspect published manifest
+        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
